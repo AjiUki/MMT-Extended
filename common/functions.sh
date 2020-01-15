@@ -344,6 +344,7 @@ if $BOOTMODE; then
   fi
 else
   mount_apex
+  export ANDROID_RUNTIME_ROOT=/apex/com.android.runtime ANDROID_TZDATA_ROOT=/apex/com.android.tzdata
 fi
 
 #Debug
