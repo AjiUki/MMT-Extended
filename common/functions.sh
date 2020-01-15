@@ -47,53 +47,51 @@ cleanup() {
 }
 
 mount_apex() {
+  local apex dest loop minorx num;
   [ ! -d /system/apex -o -e /apex/* ] && return 0
   # Mount apex files so dynamic linked stuff works
   [ -L /apex ] && rm -f /apex
-  # Apex files present - needs to extract and mount the payload imgs
-  if [ -f "/system/apex/com.android.runtime.release.apex" ]; then
-    local j=0
-    [ -e /dev/block/loop1 ] && local minorx=$(ls -l /dev/block/loop1 | awk '{print $6}') || local minorx=1
-    for i in /system/apex/*.apex; do
-      local DEST="/apex/$(basename $i | sed 's/.apex$//')"
-      [ "$DEST" == "/apex/com.android.runtime.release" ] && DEST="/apex/com.android.runtime"
-      mkdir -p $DEST
-      unzip -qo $i apex_payload.img -d /apex
-      mv -f /apex/apex_payload.img $DEST.img
-      while [ $j -lt 100 ]; do
-        local loop=/dev/loop$j
-        mknod $loop b 7 $((j * minorx)) 2>/dev/null
-        losetup $loop $DEST.img 2>/dev/null
-        j=$((j + 1))
-        losetup $loop | grep -q $DEST.img && break
-      done;
-      uloop="$uloop $((j - 1))"
-      mount -t ext4 -o loop,noatime,ro $loop $DEST || return 1
-    done
-  # Already extracted payload imgs present, just mount the folders
-  elif [ -d "/system/apex/com.android.runtime.release" ]; then
-    for i in /system/apex/*; do
-      local DEST="/apex/$(basename $i)"
-      [ "$DEST" == "/apex/com.android.runtime.release" ] && DEST="/apex/com.android.runtime"
-      mkdir -p $DEST
-      mount -o bind,ro $i $DEST
-    done
-  fi
+  # Apex files present - needs to extract and mount the payload imgs or if already extracted, mount folders
+  num=0
+  for apex in /system/apex/*; do
+    dest=/apex/$(basename $apex .apex)
+    [ "$dest" == /apex/com.android.runtime.release ] && dest=/apex/com.android.runtime
+    mkdir -p $dest
+    case $apex in
+      *.apex)
+        $bb unzip -qo $apex apex_payload.img -d /apex
+        $bb mv -f /apex/apex_payload.img $dest.img
+        $bb mount -t ext4 -o ro,noatime $dest.img $dest 2>/dev/null
+        if [ $? != 0 ]; then
+          while [ $num -lt 64 ]; do
+            loop=/dev/block/loop$num
+            ($bb mknod $loop b 7 $((num * minorx))
+            $bb losetup $loop $dest.img) 2>/dev/null
+            num=$((num + 1))
+            $bb losetup $loop | $bb grep -q $dest.img && break
+          done
+          $bb mount -t ext4 -o ro,loop,noatime $loop $dest
+          if [ $? != 0 ]; then
+            $bb losetup -d $loop 2>/dev/null
+          fi
+        fi
+      ;;
+      *) $bb mount -o bind $apex $dest;;
+    esac
+  done
   touch /apex/mmt-ex
 }
 
 umount_apex() {
-  [ -d /system/apex ] || return 0
-  [ -f /apex/mmt-ex -o -f /apex/magtmp ] || return 0
-  for i in /apex/*; do
-    umount -l $i 2>/dev/null
+  [ -d /system/apex -a -f /apex/mmt-ex ] || return 0
+  local dest loop
+  for dest in $($bb find /apex -type d -mindepth 1 -maxdepth 1); do
+    if [ -f $dest.img ]; then
+      loop=$($bb mount | $bb grep $dest | $bb cut -d" " -f1)
+    fi
+    ($bb umount -l $dest
+    $bb losetup -d $loop) 2>/dev/null
   done
-  if [ -f "/system/apex/com.android.runtime.release.apex" ]; then
-    for i in $uloop; do
-      local loop=/dev/loop$i
-      losetup -d $loop 2>/dev/null || break
-    done
-  fi
   rm -rf /apex
 }
 
