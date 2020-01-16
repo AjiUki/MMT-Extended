@@ -4,9 +4,27 @@
 #
 ##########################################################################################
 
+abort() {
+  ui_print "$1"
+  $BOOTMODE && rm -rf $MODPATH 2>/dev/null || recovery_cleanup
+  cleanup
+  rm -rf $TMPDIR 2>/dev/null
+  exit 1
+}
+
+cleanup() {
+  rm -rf $MODPATH/common 2>/dev/null
+  ui_print " "
+  ui_print "    **************************************"
+  ui_print "    *   MMT Extended by Zackptg5 @ XDA   *"
+  ui_print "    **************************************"
+  ui_print " "
+  $DEBUG && debug_log
+}
+
 debug_log() {
-  $BOOTMODE && local LOG=/storage/emulated/0/$MODID-debug || local LOG=/data/media/0/$MODID-debug
   set +x
+  local LOG=/storage/emulated/0/$MODID-debug
   echo -e "***---Device Info---***" > $LOG-tmp.log
   echo -e "\n---Props---\n" >> $LOG-tmp.log
   getprop >> $LOG-tmp.log
@@ -34,88 +52,9 @@ debug_log() {
   mv -f $LOG-tmp.log $LOG.log
 }
 
-cleanup() {
-  $BOOTMODE || { umount_apex; recovery_cleanup; }
-  ui_print " "
-  ui_print "    **************************************"
-  ui_print "    *   MMT Extended by Zackptg5 @ XDA   *"
-  ui_print "    **************************************"
-  ui_print " "
-  $DEBUG && debug_log
-  rm -rf $TMPDIR 2>/dev/null
-  exit 0
-}
-
-mount_apex() {
-  local apex dest loop minorx num;
-  [ ! -d /system/apex -o -e /apex/* ] && return 0
-  # Mount apex files so dynamic linked stuff works
-  [ -L /apex ] && rm -f /apex
-  # Apex files present - needs to extract and mount the payload imgs or if already extracted, mount folders
-  num=0
-  for apex in /system/apex/*; do
-    dest=/apex/$(basename $apex .apex)
-    [ "$dest" == /apex/com.android.runtime.release ] && dest=/apex/com.android.runtime
-    mkdir -p $dest
-    case $apex in
-      *.apex)
-        $bb unzip -qo $apex apex_payload.img -d /apex
-        $bb mv -f /apex/apex_payload.img $dest.img
-        $bb mount -t ext4 -o ro,noatime $dest.img $dest 2>/dev/null
-        if [ $? != 0 ]; then
-          while [ $num -lt 64 ]; do
-            loop=/dev/block/loop$num
-            ($bb mknod $loop b 7 $((num * minorx))
-            $bb losetup $loop $dest.img) 2>/dev/null
-            num=$((num + 1))
-            $bb losetup $loop | $bb grep -q $dest.img && break
-          done
-          $bb mount -t ext4 -o ro,loop,noatime $loop $dest
-          if [ $? != 0 ]; then
-            $bb losetup -d $loop 2>/dev/null
-          fi
-        fi
-      ;;
-      *) $bb mount -o bind $apex $dest;;
-    esac
-  done
-  touch /apex/mmt-ex
-}
-
-umount_apex() {
-  [ -d /system/apex -a -f /apex/mmt-ex ] || return 0
-  local dest loop
-  for dest in $($bb find /apex -type d -mindepth 1 -maxdepth 1); do
-    if [ -f $dest.img ]; then
-      loop=$($bb mount | $bb grep $dest | $bb cut -d" " -f1)
-    fi
-    ($bb umount -l $dest
-    $bb losetup -d $loop) 2>/dev/null
-  done
-  rm -rf /apex
-}
-
-# mount_part <partname> <flag>
-mount_part() {
-  local PART=$1
-  local POINT=/${PART}
-  local FLAG=$2
-  [ -z $FLAG ] && FLAG=rw
-  [ -L $POINT ] && rm -f $POINT
-  mkdir $POINT 2>/dev/null
-  is_mounted $POINT && return
-  ui_print "- Mounting $PART"
-  mount -o $FLAG $POINT 2>/dev/null
-  if ! is_mounted $POINT; then
-    local BLOCK=`find_block $PART$SLOT`
-    mount -o $FLAG $BLOCK $POINT
-  fi
-  is_mounted $POINT || abort "! Cannot mount $POINT"
-}
-
 device_check() {
   local PROP=$(echo "$1" | tr '[:upper:]' '[:lower:]') i
-  for i in /system_root /system /vendor /odm /product; do
+  for i in /system /vendor /odm /product; do
     if [ -f $i/build.prop ]; then
       for j in "ro.product.device" "ro.build.product" "ro.product.vendor.device" "ro.vendor.product.device"; do
         [ "$(sed -n "s/^$j=//p" $i/build.prop 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')" == "$PROP" ] && return 0
@@ -126,15 +65,13 @@ device_check() {
 }
 
 run_addons() {
-  local OPT=`getopt -o mhiuv -- "$@"` NAME PNAME
+  local OPT=`getopt -o mpi -- "$@"` NAME PNAME
   eval set -- "$OPT"
   while true; do
     case "$1" in
       -m) NAME=main; shift;;
-      -h) NAME=preinstall; PNAME="Preinstall"; shift;;
+      -p) NAME=preinstall; PNAME="Preinstall"; shift;;
       -i) NAME=install; PNAME="Install"; shift;;
-      -u) NAME=uninstall; PNAME="Uninstall"; shift;;
-      -v) NAME=postuninstall; PNAME="Postuninstall"; shift;;
       --) shift; break;;
     esac
   done
@@ -199,6 +136,7 @@ install_script() {
       *) sed -i "1a $i=$(eval echo \$$i)" $1;;
     esac
   done
+  [ "$1" == "$MODPATH/uninstall.sh" ] && return 0
   case $(basename $1) in
     post-fs-data.sh|service.sh) ;;
     *) cp_ch -n $1 $INPATH/$(basename $1) 0755;;
@@ -213,114 +151,9 @@ prop_process() {
   done < $1
 }
 
-main_install() {
-  ui_print "- Installing"
-
-  # Preinstall Addons
-  run_addons -h
-
-  # Run user install script
-  [ -f "$MODPATH/common/install.sh" ] && . $MODPATH/common/install.sh
-
-  # Install Addons
-  run_addons -i
-
-  ui_print "   Installing for $ARCH SDK $API device..."
-
-  # Remove comments from files and place them, add blank line to end if not already present
-  for i in $(find $MODPATH -type f -name "*.sh" -o -name "*.prop" -o -name "*.rule"); do
-    [ -f $i ] && { sed -i -e "/^#/d" -e "/^ *$/d" $i; [ "$(tail -1 $i)" ] && echo "" >> $i; } || continue
-    case $i in
-      "$MODPATH/service.sh") install_script -l $i;;
-      "$MODPATH/post-fs-data.sh") install_script -p $i;;
-      "$MODPATH/sepolicy.rule") [ -e "$PERSISTDIR" ] || continue
-                                ui_print "- Installing custom sepolicy patch"
-                                cp_ch -n $MODPATH/sepolicy.rule $PERSISTMOD/sepolicy.rule;;
-    esac
-  done
-
-  # Move files
-  $IS64BIT || for i in $(find $MODPATH/system -type d -name "lib64"); do rm -rf $i 2>/dev/null; done  
-  [ -d "/system/priv-app" ] || mv -f $MODPATH/system/priv-app $MODPATH/system/app 2>/dev/null
-  [ -d "/system/xbin" ] || mv -f $MODPATH/system/xbin $MODPATH/system/bin 2>/dev/null
-  if $DYNLIB; then
-    for FILE in $(find $MODPATH/system/lib*/* -maxdepth 0 -type d 2>/dev/null | sed -e "s|$MODPATH/system/lib.*/modules||" -e "s|$MODPATH/system/||"); do
-      mkdir -p $(dirname $MODPATH/system/vendor/$FILE)
-      mv -f $MODPATH/system/$FILE $MODPATH/system/vendor/$FILE
-    done
-  fi
-  cp_ch -n $MODPATH/module.prop $NVBASE/modules/.$MODID-module.prop
-
-  # Handle replace folders
-  for TARGET in $REPLACE; do
-    ui_print "- Replace target: $TARGET"
-    mktouch $MODPATH$TARGET/.replace
-  done
-
-  if $BOOTMODE; then
-    # Update info for Magisk Manager
-    rm -f $NVBASE/modules/$MODID/remove
-    mktouch $NVBASE/modules/$MODID/update
-    cp -af $MODPATH/module.prop $NVBASE/modules/$MODID/module.prop
-  fi
-  
-  # Remove info and uninstall file if not needed
-  [ -s $INFO ] && sed -i "1i FILE=$NVBASE/modules/.$MODID-files\nMODID=$MODID" $MODPATH/uninstall.sh || rm -f $INFO $MODPATH/uninstall.sh
-
-  # Set permissions
-  ui_print " "
-  ui_print "- Setting Permissions"
-  set_perm_recursive $MODPATH 0 0 0755 0644
-  set_permissions
-
-  rm -rf $MODPATH/common \
-  $MODPATH/system/placeholder $MODPATH/customize.sh \
-  $MODPATH/README.md $MODPATH/.git* 2>/dev/null
-}
-
-main_uninstall() {
-  ui_print " "
-  ui_print "- Uninstalling"
-
-  # Uninstall Addons
-  run_addons -u
-
-  # Remove files
-  if [ -f $NVBASE/modules/.$MODID-files ]; then
-    while read LINE; do
-      if [ "$(echo -n $LINE | tail -c 1)" == "~" ]; then
-        continue
-      elif [ -f "$LINE~" ]; then
-        mv -f $LINE~ $LINE
-      else
-        rm -f $LINE
-        while true; do
-          LINE=$(dirname $LINE)
-          [ "$(ls -A $LINE 2>/dev/null)" ] && break 1 || rm -rf $LINE
-        done
-      fi
-    done < $NVBASE/modules/.$MODID-files
-  fi
-
-  # Run user install script
-  [ -f "$MODPATH/common/uninstall.sh" ] && . $MODPATH/common/uninstall.sh
-
-  rm -rf $NVBASE/modules_update/$MODID $NVBASE/modules/.$MODID-module.prop $NVBASE/modules/.$MODID-files 2>/dev/null
-  $BOOTMODE && { [ -d $NVBASE/modules/$MODID ] && touch $NVBASE/modules/$MODID/remove; } || rm -rf $MODPATH
-  
-  # Postuninstall Addons
-  run_addons -v
-}
-
 # Check for min/max api version
-for i in MINAPI MAXAPI; do
-  case $i in 
-    "MINAPI") i=$(eval echo \$$i); [ -z $i ] && continue
-              [ $API -lt $i ] && abort "! Your system API of $API is less than the minimum api of $i! Aborting!";;
-    "MAXAPI") i=$(eval echo \$$i); [ -z $i ] && continue
-              [ $API -gt $i ] && abort "! Your system API of $API is greater than the maximum api of $i! Aborting!";;
-  esac
-done
+[ -z $MINAPI ] || { [ $API -lt $MINAPI ] && abort "! Your system API of $API is less than the minimum api of $i! Aborting!"; }
+[ -z $MAXAPI ] || { [ $API -gt $MAXAPI ] && abort "! Your system API of $API is greater than the maximum api of $i! Aborting!"; }
 
 # Set variables
 [ $API -lt 26 ] && DYNLIB=false
@@ -343,52 +176,85 @@ if $BOOTMODE; then
     ORIGVEN=$ORIGDIR/vendor
   fi
 else
-  mount_apex
-  export ANDROID_RUNTIME_ROOT=/apex/com.android.runtime ANDROID_TZDATA_ROOT=/apex/com.android.tzdata
+  ui_print "- Only uninstall is supported in recovery"
+  ui_print "  Uninstalling!"
+  touch $MODPATH/remove
+  [ -s $INFO ] && install_script $MODPATH/uninstall.sh || rm -f $INFO $MODPATH/uninstall.sh
+  recovery_cleanup
+  cleanup
+  rm -rf $NVBASE/modules_update/$MODID $TMPDIR 2>/dev/null
+  exit 0
 fi
 
-#Debug
+# Debug
 if $DEBUG; then
-  ui_print " "
   ui_print "- Debug mode"
-  if $BOOTMODE; then
-    ui_print "  Debug log will be written to: /storage/emulated/0/$MODID-debug.log"
-    exec 2>/storage/emulated/0/$MODID-debug.log
-  else
-    ui_print "  Debug log will be written to: /data/media/0/$MODID-debug.log"
-    exec 2>/data/media/0/$MODID-debug.log
-  fi
+  ui_print "  Debug log will be written to: /storage/emulated/0/$MODID-debug.log"
+  exec 2>/storage/emulated/0/$MODID-debug.log
   set -x
 fi
 
-# Extract files - done this way so we can mount apex before chcon is called from set_perm
+# Extract files
 ui_print "- Extracting module files"
 unzip -o "$ZIPFILE" -x 'META-INF/*' 'common/functions.sh' -d $MODPATH >&2
+[ -f "$MODPATH/common/addon.tar.xz" ] && tar -xf $MODPATH/common/addon.tar.xz -C $MODPATH/common 2>/dev/null
 
 # Main addons
-[ -f "$MODPATH/common/addon.tar.xz" ] && tar -xf $MODPATH/common/addon.tar.xz -C $MODPATH/common 2>/dev/null
 run_addons -m
 
-# Load user vars/function
-custom
+# Remove files outside of module directory
+ui_print "- Removing old files"
 
-# Determine mod installation status
-ui_print " "
-if [ -f "$NVBASE/modules/.$MODID-module.prop" ]; then
-  if [ $(grep_prop versionCode $NVBASE/modules/.$MODID-module.prop) -ge $(grep_prop versionCode $TMPDIR/module.prop) ]; then
-    ui_print "- Current or newer version detected. Uninstalling!"
-    main_uninstall
-  else
-    ui_print "- Older version detected. Upgrading!"
-    [ -f "$MODPATH/common/upgrade.sh" ] && . $MODPATH/common/upgrade.sh
-    main_uninstall
-    mkdir -p $MODPATH
-    unzip -o "$ZIPFILE" -x 'META-INF/*' 'common/functions.sh' -d $MODPATH >&2
-    main_install
-  fi
-else
-  main_install
+if [ -f $INFO ]; then
+  while read LINE; do
+    if [ "$(echo -n $LINE | tail -c 1)" == "~" ]; then
+      continue
+    elif [ -f "$LINE~" ]; then
+      mv -f $LINE~ $LINE
+    else
+      rm -f $LINE
+      while true; do
+        LINE=$(dirname $LINE)
+        [ "$(ls -A $LINE 2>/dev/null)" ] && break 1 || rm -rf $LINE
+      done
+    fi
+  done < $INFO
+  rm -f $INFO
 fi
 
-# Complete (un)install
+### Install
+ui_print "- Installing"
+
+run_addons -p
+[ -f "$MODPATH/common/install.sh" ] && . $MODPATH/common/install.sh
+run_addons -i
+
+ui_print "   Installing for $ARCH SDK $API device..."
+# Remove comments from files and place them, add blank line to end if not already present
+for i in $(find $MODPATH -type f -name "*.sh" -o -name "*.prop" -o -name "*.rule"); do
+  [ -f $i ] && { sed -i -e "/^#/d" -e "/^ *$/d" $i; [ "$(tail -1 $i)" ] && echo "" >> $i; } || continue
+  case $i in
+    "$MODPATH/service.sh") install_script -l $i;;
+    "$MODPATH/post-fs-data.sh") install_script -p $i;;
+    "$MODPATH/uninstall.sh") [ -s $INFO ] && install_script $MODPATH/uninstall.sh || rm -f $INFO $MODPATH/uninstall.sh;;
+  esac
+done
+
+$IS64BIT || for i in $(find $MODPATH/system -type d -name "lib64"); do rm -rf $i 2>/dev/null; done  
+[ -d "/system/priv-app" ] || mv -f $MODPATH/system/priv-app $MODPATH/system/app 2>/dev/null
+[ -d "/system/xbin" ] || mv -f $MODPATH/system/xbin $MODPATH/system/bin 2>/dev/null
+if $DYNLIB; then
+  for FILE in $(find $MODPATH/system/lib*/* -maxdepth 0 -type d 2>/dev/null | sed -e "s|$MODPATH/system/lib.*/modules||" -e "s|$MODPATH/system/||"); do
+    mkdir -p $(dirname $MODPATH/system/vendor/$FILE)
+    mv -f $MODPATH/system/$FILE $MODPATH/system/vendor/$FILE
+  done
+fi
+
+# Set permissions
+ui_print " "
+ui_print "- Setting Permissions"
+set_perm_recursive $MODPATH 0 0 0755 0644
+set_permissions
+
+# Complete install
 cleanup
